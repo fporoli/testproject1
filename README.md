@@ -1,2 +1,2 @@
 # testproject1
-test project 1 
+Test project 1.... Initial setup 
