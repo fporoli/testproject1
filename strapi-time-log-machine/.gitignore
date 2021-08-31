@@ -112,12 +112,3 @@ exports
 *.cache
 build
 .strapi-updater.json
-
-##########################
-# Node
-##########################
-
-node_modules
-build
-npm-debug.log
-.env
