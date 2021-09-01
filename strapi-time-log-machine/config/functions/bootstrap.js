@@ -1,9 +1,15 @@
+"use strict";
+
 const fs = require("fs");
+const path = require("path");
+const mime = require("mime-types");
 const {
-  pages,
-  globals,
-  leadFormSubmissions,
-} = require("../../data/data.js");
+  categories,
+  homepage,
+  writers,
+  articles,
+  global,
+} = require("../../data/data.json");
 
 async function isFirstRun() {
   const pluginStore = strapi.store({
@@ -25,7 +31,10 @@ async function setPublicPermissions(newPermissions) {
   // List all available permissions
   const publicPermissions = await strapi
     .query("permission", "users-permissions")
-    .find({ type: "application", role: publicRole.id });
+    .find({
+      type: ["users-permissions", "application"],
+      role: publicRole.id,
+    });
 
   // Update permission to match new config
   const controllersToUpdate = Object.keys(newPermissions);
@@ -46,7 +55,6 @@ async function setPublicPermissions(newPermissions) {
         .query("permission", "users-permissions")
         .update({ id: permission.id }, { enabled: true });
     });
-
   await Promise.all(updatePromises);
 }
 
@@ -62,7 +70,7 @@ function getFileData(fileName) {
   // Parse the file metadata
   const size = getFileSizeInBytes(filePath);
   const ext = fileName.split(".").pop();
-  const mimeType = `image/${ext === "svg" ? "svg+xml" : ext}`;
+  const mimeType = mime.lookup(ext);
 
   return {
     path: filePath,
@@ -73,151 +81,129 @@ function getFileData(fileName) {
 }
 
 // Create an entry and attach files if there are any
-async function createEntry(model, entry, files) {
+async function createEntry({ model, entry, files }) {
   try {
     const createdEntry = await strapi.query(model).create(entry);
     if (files) {
       await strapi.entityService.uploadFiles(createdEntry, files, {
         model,
       });
-      const uploads = await strapi.query("file", "upload").find();
-      const uploadsWithInfo = uploads.map((upload) => {
-        const [alternativeText] = upload.name.split(".");
-        return strapi.plugins.upload.services.upload.updateFileInfo(upload.id, {
-          alternativeText,
-        });
-      });
-      await Promise.all(uploadsWithInfo);
     }
   } catch (e) {
-    console.log(e);
+    console.log("model", entry, e);
   }
 }
 
-async function importPages(pages) {
-  const getPageCover = (slug) => {
-    switch (slug) {
-      case "":
-        return getFileData("undraw-content-team.png");
-      default:
-        return null;
-    }
+async function importCategories() {
+  return Promise.all(
+    categories.map((category) => {
+      return createEntry({ model: "category", entry: category });
+    })
+  );
+}
+
+async function importHomepage() {
+  const files = {
+    "seo.shareImage": getFileData("default-image.png"),
   };
+  await createEntry({ model: "homepage", entry: homepage, files });
+}
 
-  return pages.map(async (page) => {
-    const files = {};
-    const shareImage = getPageCover(page.slug);
-    if (shareImage) {
-      files["metadata.shareImage"] = shareImage;
-    }
-    // Check if dynamic zone has attached files
-    page.contentSections.forEach((section, index) => {
-      if (section.__component === "sections.hero") {
-        files[`contentSections.${index}.picture`] = getFileData(
-          "undraw-content-team.svg"
-        );
-      } else if (section.__component === "sections.feature-rows-group") {
-        const getFeatureMedia = (featureIndex) => {
-          switch (featureIndex) {
-            case 0:
-              return getFileData("undraw-design-page.svg");
-            case 1:
-              return getFileData("undraw-create-page.svg");
-            default:
-              return null;
-          }
-        };
-        section.features.forEach((feature, featureIndex) => {
-          files[
-            `contentSections.${index}.features.${featureIndex}.media`
-          ] = getFeatureMedia(featureIndex);
-        });
-      } else if (section.__component === "sections.feature-columns-group") {
-        const getFeatureMedia = (featureIndex) => {
-          switch (featureIndex) {
-            case 0:
-              return getFileData("preview.svg");
-            case 1:
-              return getFileData("devices.svg");
-            case 2:
-              return getFileData("palette.svg");
-            default:
-              return null;
-          }
-        };
-        section.features.forEach((feature, featureIndex) => {
-          files[
-            `contentSections.${index}.features.${featureIndex}.icon`
-          ] = getFeatureMedia(featureIndex);
-        });
-      } else if (section.__component === "sections.testimonials-group") {
-        section.logos.forEach((logo, logoIndex) => {
-          files[
-            `contentSections.${index}.logos.${logoIndex}.logo`
-          ] = getFileData("logo.png");
-        });
-        section.testimonials.forEach((testimonial, testimonialIndex) => {
-          files[
-            `contentSections.${index}.testimonials.${testimonialIndex}.logo`
-          ] = getFileData("logo.png");
-          files[
-            `contentSections.${index}.testimonials.${testimonialIndex}.picture`
-          ] = getFileData("user.png");
-        });
-      }
-    });
+async function importWriters() {
+  return Promise.all(
+    writers.map(async (writer) => {
+      const files = {
+        picture: getFileData(`${writer.email}.jpg`),
+      };
+      return createEntry({
+        model: "writer",
+        entry: writer,
+        files,
+      });
+    })
+  );
+}
 
-    await createEntry("page", page, files);
-  });
+// Randomly set relations on Article to avoid error with MongoDB
+function getEntryWithRelations(article, categories, authors) {
+  const isMongoose = strapi.config.connections.default.connector == "mongoose";
+
+  if (isMongoose) {
+    const randomRelation = (relation) =>
+      relation[Math.floor(Math.random() * relation.length)].id;
+    delete article.category.id;
+    delete article.author.id;
+
+    return {
+      ...article,
+      category: {
+        _id: randomRelation(categories),
+      },
+      author: {
+        _id: randomRelation(authors),
+      },
+    };
+  }
+
+  return article;
+}
+
+async function importArticles() {
+  const categories = await strapi.query("category").find();
+  const authors = await strapi.query("writer").find();
+
+  return Promise.all(
+    articles.map((article) => {
+      // Get relations for each article
+      const entry = getEntryWithRelations(article, categories, authors);
+
+      const files = {
+        image: getFileData(`${article.slug}.jpg`),
+      };
+
+      return createEntry({
+        model: "article",
+        entry,
+        files,
+      });
+    })
+  );
 }
 
 async function importGlobal() {
-  // Add images
   const files = {
     favicon: getFileData("favicon.png"),
-    "metadata.shareImage": getFileData("undraw-content-team.png"),
-    "navbar.logo": getFileData("logo.png"),
-    "footer.logo": getFileData("logo.png"),
+    "defaultSeo.shareImage": getFileData("default-image.png"),
   };
-
-  // Create entry
-  globals.forEach(async (locale) => {
-    await createEntry("global", locale, files);
-  })
-}
-
-async function importLeadFormSubmissionData() {
-  leadFormSubmissions.forEach(async (submission) => {
-    await createEntry("lead-form-submissions", submission);
-  });
+  return createEntry({ model: "global", entry: global, files });
 }
 
 async function importSeedData() {
   // Allow read of application content types
   await setPublicPermissions({
     global: ["find"],
-    page: ["find", "findone"],
-    "lead-form-submissions": ["create"],
+    homepage: ["find"],
+    article: ["find", "findone"],
+    category: ["find", "findone"],
+    writer: ["find", "findone"],
   });
 
-
-  await strapi.query("locale", "i18n").create({
-    name: "French (fr)",
-    code: "fr",
-  });
-
-  
   // Create all entries
+  await importCategories();
+  await importHomepage();
+  await importWriters();
+  await importArticles();
   await importGlobal();
-  await importPages(pages);
-  await importLeadFormSubmissionData();
 }
 
 module.exports = async () => {
   const shouldImportSeedData = await isFirstRun();
+
   if (shouldImportSeedData) {
     try {
+      console.log("Setting up the template...");
       await importSeedData();
+      console.log("Ready to go");
     } catch (error) {
       console.log("Could not import seed data");
       console.error(error);
